@@ -57,17 +57,19 @@ function App() {
   const [screen, setScreen] = useState('home');
   const [menu, setMenu] = useState(false);
   const [toast, setToast] = useState('');
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
   const lastPushCheck = useRef(0);
   const sessionUserId = useRef(null);
 
   useEffect(() => {
     if (!supabase) { setAuthLoading(false); return; }
     supabase.auth.getSession().then(({ data }) => { sessionUserId.current = data.session?.user?.id || null; setSession(data.session); setAuthLoading(false); });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
       const nextUserId = nextSession?.user?.id || null;
       if (sessionUserId.current !== nextUserId) setProfile(null);
       sessionUserId.current = nextUserId;
       setSession(nextSession);
+      if (event === 'PASSWORD_RECOVERY') { setPasswordRecovery(true); setScreen('settings'); }
     });
     return () => listener.subscription.unsubscribe();
   }, []);
@@ -280,7 +282,8 @@ function App() {
   if (!session) return <Landing />;
   if (!profile) return <Splash text="Cargando tu perfil…" />;
 
-  if (['admin', 'platform_admin', 'municipal_admin'].includes(profile.role)) return <><AdminPanel profile={profile} email={session.user.email} onSignOut={() => supabase.auth.signOut()} notify={setToast} />{toast && <Toast text={toast} close={() => setToast('')} />}</>;
+  if (['admin', 'platform_admin', 'municipal_admin'].includes(profile.role)) return <><AdminPanel profile={profile} email={session.user.email} onSignOut={() => supabase.auth.signOut()} notify={setToast} initialSection={passwordRecovery ? 'password' : undefined} />{toast && <Toast text={toast} close={() => setToast('')} />}</>;
+  if (passwordRecovery) return <div className="municipality-picker"><div className="municipality-picker-card"><Brand /><LockKeyhole className="picker-icon" /><small>RECUPERACIÓN DE CUENTA</small><h1>Creá una nueva contraseña</h1><p>Elegí una contraseña segura de al menos 8 caracteres para volver a ingresar.</p><PasswordCard /><button className="link-button" onClick={() => supabase.auth.signOut()}>Volver al ingreso</button></div></div>;
   if (profile.role === 'neighbor' && !profile.municipality_id) return <><MunicipalityPicker municipalities={municipalities} choose={chooseMunicipality} signOut={() => supabase.auth.signOut()} />{toast && <Toast text={toast} close={() => setToast('')} />}</>;
   if (profile.role === 'driver' && !profile.municipality_id) return <Splash text="Tu cuenta de conductor todavía no fue asociada a un municipio." />;
 
@@ -389,6 +392,14 @@ function Landing() {
     }
   };
 
+  const recoverPassword = async () => {
+    if (!form.email) return setMessage('Ingresá tu correo electrónico para recuperar la contraseña.');
+    setLoading(true); setMessage('');
+    const { error } = await supabase.auth.resetPasswordForEmail(form.email, { redirectTo: `${window.location.origin}${window.location.pathname}` });
+    setLoading(false);
+    setMessage(error ? `No se pudo enviar el correo: ${error.message}` : 'Si el correo está registrado, recibirás un enlace para crear una nueva contraseña.');
+  };
+
   return <div className="landing"><section className="hero-panel"><Brand /><div className="hero-copy"><span className="eyebrow">TU BARRIO, MÁS LIMPIO</span><h1>La recolección,<br /><em>más cerca tuyo.</em></h1><p>Seguí el camión en tiempo real y recibí una alerta justo antes de que pase por tu casa.</p><div className="hero-points"><span><Radio /> Ubicación en vivo</span><span><Bell /> Alertas personalizadas</span><span><Route /> Rutas inteligentes</span></div></div><small className="copyright">© 2026 EcoAlerta · Municipio conectado</small></section>
     <section className="login-panel"><div className="login-card"><div className="welcome-icon"><Truck /></div><h2>¡Hola de nuevo!</h2><p>Elegí cómo querés ingresar</p>
       {!showLogin && <div className="role-selector three-roles"><button onClick={() => chooseRole('neighbor')}><UserRound /><b>Soy vecino</b><small>Quiero recibir alertas</small></button><button onClick={() => chooseRole('truck')}><Truck /><b>Soy conductor</b><small>Gestiono el recorrido</small></button><button onClick={() => chooseRole('administrator')}><ShieldCheck /><b>Administración</b><small>Gestiono la plataforma</small></button></div>}
@@ -397,6 +408,7 @@ function Landing() {
         {registering && <label>Nombre completo<div><UserRound /><input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div></label>}
         <label>Correo electrónico<div><CircleUserRound /><input required type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></div></label>
         <label>Contraseña<div><LockKeyhole /><input required minLength="8" type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} /></div></label>
+        {!registering && <button type="button" className="link-button" disabled={loading} onClick={recoverPassword}>Olvidé mi contraseña</button>}
         {message && <p className="form-message">{message}</p>}<button className="primary big" disabled={loading}>{loading ? 'Conectando…' : registering ? 'Crear cuenta' : 'Ingresar'} <ChevronRight /></button>
         {selectedRole === 'neighbor' && <button type="button" className="link-button" onClick={() => { setRegistering(!registering); setMessage(''); }}>{registering ? 'Ya tengo una cuenta' : 'Crear cuenta de vecino'}</button>}
       </form></>}
@@ -436,9 +448,30 @@ function AlertsScreen({ role, radius, alertsEnabled, savePreferences, meters, al
   return <><PageTitle eyebrow="CENTRO DE ALERTAS" title="Tus notificaciones" subtitle="Elegí con cuánta anticipación querés que te avisemos." /><div className="settings-grid"><section className="card radius-card"><div className="setting-head"><span><LocateFixed /></span><div><h3>Radio de cercanía</h3><p>Te avisaremos cuando el camión entre en esta zona.</p></div></div><div className="radius-number"><b>{radius}</b><span>metros</span></div><input type="range" min="100" max="1000" step="50" value={radius} onChange={event => savePreferences({ alert_radius_m: +event.target.value })} /><div className="range-labels"><span>100 m</span><span>1 km</span></div><div className="estimate"><Clock3 /><span>Aviso aproximado <b>{Math.max(1, Math.round(radius / 110))} minutos antes</b></span></div></section><section className="card notification-card"><div className="setting-head"><span><Volume2 /></span><div><h3>Notificaciones push</h3><p>Funcionan incluso con la app en segundo plano.</p></div><button className={`toggle ${alertsEnabled ? 'on' : ''}`} onClick={() => savePreferences({ push_enabled: !alertsEnabled })}><i /></button></div><button className="primary push-button" onClick={activatePush}><Bell /> Activar en este celular</button><p className="distance-now">Distancia actual: <b>{meters == null ? 'sin datos' : `${meters} m`}</b></p></section></div><section className="card alerts-table alert-history"><h3>Historial</h3>{alerts.length ? alerts.map(item => <div className="alert-row" key={item.id}><span><Check /></span><p><b>{item.title}</b><small>{item.body} · {new Date(item.sent_at).toLocaleString('es-AR')}</small></p></div>) : <p className="muted">Todavía no recibiste alertas.</p>}</section></>;
 }
 
-function SettingsScreen({ role, profile, email, municipality, municipalities, chooseMunicipality, vehicle, saveProfile, setHomeFromGps }) {
+function SettingsScreen(props) {
+  return <><SettingsProfile {...props} /><div className="settings-grid password-settings-grid"><PasswordCard /></div></>;
+}
+
+function SettingsProfile({ role, profile, email, municipality, municipalities, chooseMunicipality, vehicle, saveProfile, setHomeFromGps }) {
   const [form, setForm] = useState({ full_name: profile.full_name || '', address: profile.address || '' });
   return <><PageTitle eyebrow="CONFIGURACIÓN" title="Preferencias de la cuenta" subtitle="Administrá tus datos y la experiencia de EcoAlerta." /><div className="settings-grid"><section className="card form-card"><h3>Datos personales</h3><label>Nombre completo<input value={form.full_name} onChange={e => setForm({ ...form, full_name: e.target.value })} /></label><label>Correo electrónico<input value={email || ''} disabled /></label>{role === 'neighbor' && <><label>Municipio o localidad<select value={profile.municipality_id || ''} onChange={e => chooseMunicipality(e.target.value)}>{municipalities.map(item => <option key={item.id} value={item.id}>{item.locality} · {item.name}</option>)}</select></label><label>Domicilio<input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} /></label></>}<button className="primary" onClick={() => saveProfile(form)}>Guardar cambios</button>{role === 'neighbor' && <button className="outline location-button" onClick={() => setHomeFromGps(address => setForm(current => ({ ...current, address })))}><LocateFixed /> Usar ubicación actual como domicilio</button>}</section><section className="card form-card"><h3>{role === 'truck' ? 'Unidad asignada' : 'Municipio seleccionado'}</h3><div className="assigned"><span>{role === 'truck' ? <Truck /> : <MapPin />}</span><div><b>{role === 'truck' ? `Unidad ${vehicle?.unit_number || 'sin asignar'} · ${vehicle?.description || 'Camión recolector'}` : municipality?.name || 'Sin municipio'}</b><small>{role === 'truck' ? vehicle?.plate || 'Sin patente' : `${municipality?.locality || ''}${municipality?.province ? ` · ${municipality.province}` : ''}`}</small></div></div><p className="muted">Las rutas, unidades y alertas corresponden únicamente al municipio seleccionado.</p></section></div></>;
+}
+
+function PasswordCard() {
+  const [passwords, setPasswords] = useState({ password: '', confirmation: '' });
+  const [message, setMessage] = useState('');
+  const [saving, setSaving] = useState(false);
+  const changePassword = async event => {
+    event.preventDefault(); setMessage('');
+    if (passwords.password.length < 8) return setMessage('La contraseña debe tener al menos 8 caracteres.');
+    if (passwords.password !== passwords.confirmation) return setMessage('Las contraseñas no coinciden.');
+    setSaving(true);
+    const { error } = await supabase.auth.updateUser({ password: passwords.password });
+    setSaving(false);
+    if (error) return setMessage(error.message);
+    setPasswords({ password: '', confirmation: '' }); setMessage('Contraseña actualizada correctamente.');
+  };
+  return <form className="card form-card" onSubmit={changePassword}><h3>Mi contraseña</h3><label>Nueva contraseña<input required minLength="8" type="password" autoComplete="new-password" value={passwords.password} onChange={e => setPasswords({ ...passwords, password: e.target.value })} /></label><label>Repetir nueva contraseña<input required minLength="8" type="password" autoComplete="new-password" value={passwords.confirmation} onChange={e => setPasswords({ ...passwords, confirmation: e.target.value })} /></label>{message && <p className="form-message">{message}</p>}<button className="primary" disabled={saving}><LockKeyhole /> {saving ? 'Guardando…' : 'Cambiar contraseña'}</button></form>;
 }
 
 function MunicipalityPicker({ municipalities, choose, signOut }) {

@@ -6,17 +6,18 @@ import { RouteDesignerMap } from './RouteMap';
 const slugify = value => value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 const roleOptions = [{ value: 'neighbor', label: 'Vecino' }, { value: 'driver', label: 'Conductor' }, { value: 'municipal_admin', label: 'Administrador municipal' }, { value: 'platform_admin', label: 'Administrador de plataforma' }];
 
-export function AdminPanel({ profile, email, onSignOut, notify }) {
+export function AdminPanel({ profile, email, onSignOut, notify, initialSection }) {
   const platform = ['admin', 'platform_admin'].includes(profile.role);
   const displayName = String(profile.full_name || email || 'Administrador');
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenu, setMobileMenu] = useState(false);
-  const [section, setSection] = useState('dashboard');
+  const [section, setSection] = useState(initialSection || 'dashboard');
   const platformItems = [
     { id: 'dashboard', label: 'Resumen', icon: <LayoutDashboard /> },
     { id: 'municipalities', label: 'Municipios', icon: <Building2 /> },
     { id: 'fleet', label: 'Flotas', icon: <Truck /> },
     { id: 'users', label: 'Usuarios y accesos', icon: <Users /> },
+    { id: 'password', label: 'Mi contraseña', icon: <KeyRound /> },
   ];
   const municipalityItems = [
     { id: 'dashboard', label: 'Resumen', icon: <LayoutDashboard /> },
@@ -25,6 +26,7 @@ export function AdminPanel({ profile, email, onSignOut, notify }) {
     { id: 'route-map', label: 'Diseñar recorridos', icon: <MapIcon /> },
     { id: 'assignments', label: 'Asignaciones', icon: <ClipboardList /> },
     { id: 'drivers', label: 'Conductores', icon: <Users /> },
+    { id: 'password', label: 'Mi contraseña', icon: <KeyRound /> },
   ];
   const items = platform ? platformItems : municipalityItems;
   const navigate = id => { setSection(id); setMobileMenu(false); };
@@ -36,8 +38,24 @@ export function AdminPanel({ profile, email, onSignOut, notify }) {
     <aside className={`admin-sidebar ${mobileMenu ? 'mobile-open' : ''}`}><div className="admin-sidebar-brand"><button type="button" className="admin-brand-toggle" title={collapsed ? 'Expandir menú' : 'Contraer menú'} aria-label={collapsed ? 'Expandir menú' : 'Contraer menú'} onClick={toggleSidebar}><span><Trash2 /></span><div><b>EcoAlerta</b><small>{platform ? 'PLATAFORMA' : 'MUNICIPIO'}</small></div></button><button className="mobile-admin-close" onClick={() => setMobileMenu(false)}><X /></button></div><nav>{items.map(item => <button key={item.id} className={section === item.id ? 'active' : ''} onClick={() => navigate(item.id)}>{item.icon}<span>{item.label}</span></button>)}</nav><button className="admin-sidebar-logout" onClick={onSignOut}><LogOut /><span>Cerrar sesión</span></button></aside>
     {mobileMenu && <button className="admin-overlay" onClick={() => setMobileMenu(false)} />}
     <div className="admin-workspace"><header className="admin-topbar"><button className="admin-mobile-menu" onClick={() => setMobileMenu(true)}><Menu /></button><div className="admin-section-name">{items.find(item => item.id === section)?.label}</div><div className="admin-user"><span><b>{displayName}</b><small>{platform ? 'Administrador de plataforma' : 'Administrador municipal'}</small></span><div className="admin-avatar">{displayName.slice(0, 2).toUpperCase()}</div></div></header>
-    <main className="admin-content">{platform ? <PlatformPanel section={section} notify={notify} /> : <MunicipalPanel section={section} profile={profile} notify={notify} />}</main></div>
+    <main className="admin-content">{section === 'password' ? <AdminPasswordPanel notify={notify} /> : platform ? <PlatformPanel section={section} notify={notify} /> : <MunicipalPanel section={section} profile={profile} notify={notify} />}</main></div>
   </div>;
+}
+
+function AdminPasswordPanel({ notify }) {
+  const [form, setForm] = useState({ password: '', confirmation: '' });
+  const [saving, setSaving] = useState(false);
+  const submit = async event => {
+    event.preventDefault();
+    if (form.password.length < 8) return notify('La contraseña debe tener al menos 8 caracteres.');
+    if (form.password !== form.confirmation) return notify('Las contraseñas no coinciden.');
+    setSaving(true);
+    const { error } = await supabase.auth.updateUser({ password: form.password });
+    setSaving(false);
+    if (error) return notify(`No se pudo cambiar la contraseña: ${error.message}`);
+    setForm({ password: '', confirmation: '' }); notify('Contraseña actualizada correctamente.');
+  };
+  return <><AdminHeading eyebrow="SEGURIDAD" title="Mi contraseña" subtitle="Actualizá la contraseña de tu propia cuenta." /><AdminCard title="Cambiar contraseña" icon={<KeyRound />}><form className="admin-form" onSubmit={submit}><Field label="Nueva contraseña (mínimo 8 caracteres)" type="password" value={form.password} onChange={password => setForm({ ...form, password })} /><Field label="Repetir nueva contraseña" type="password" value={form.confirmation} onChange={confirmation => setForm({ ...form, confirmation })} /><button className="primary" disabled={saving}><KeyRound /> {saving ? 'Guardando…' : 'Cambiar contraseña'}</button></form></AdminCard></>;
 }
 
 function PlatformPanel({ section, notify }) {
