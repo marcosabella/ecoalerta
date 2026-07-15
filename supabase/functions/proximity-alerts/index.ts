@@ -18,6 +18,45 @@ const distanceMeters = (a: { lat: number; lng: number }, b: { lat: number; lng: 
   return Math.round(12742000 * Math.asin(Math.sqrt(h)));
 };
 
+type Point = { lat: number; lng: number };
+
+const pointToSegmentDistanceMeters = (point: Point, start: Point, end: Point) => {
+  const referenceLat = (point.lat + start.lat + end.lat) / 3 * Math.PI / 180;
+  const metersPerDegreeLat = 111_320;
+  const metersPerDegreeLng = metersPerDegreeLat * Math.cos(referenceLat);
+  const px = point.lng * metersPerDegreeLng;
+  const py = point.lat * metersPerDegreeLat;
+  const ax = start.lng * metersPerDegreeLng;
+  const ay = start.lat * metersPerDegreeLat;
+  const bx = end.lng * metersPerDegreeLng;
+  const by = end.lat * metersPerDegreeLat;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lengthSquared = dx * dx + dy * dy;
+  const projection = lengthSquared === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lengthSquared));
+  return Math.hypot(px - (ax + projection * dx), py - (ay + projection * dy));
+};
+
+const distanceToRouteMeters = (point: Point, routePath: unknown) => {
+  const geometry = routePath as { type?: string; coordinates?: unknown[] };
+  if (geometry?.type !== 'LineString' || !Array.isArray(geometry.coordinates) || geometry.coordinates.length < 2) return Infinity;
+  let minimum = Infinity;
+  for (let index = 1; index < geometry.coordinates.length; index += 1) {
+    const previous = geometry.coordinates[index - 1];
+    const current = geometry.coordinates[index];
+    if (!Array.isArray(previous) || !Array.isArray(current)) continue;
+    const [startLng, startLat] = previous.map(Number);
+    const [endLng, endLat] = current.map(Number);
+    if (![startLat, startLng, endLat, endLng].every(Number.isFinite)) continue;
+    minimum = Math.min(minimum, pointToSegmentDistanceMeters(point, { lat: startLat, lng: startLng }, { lat: endLat, lng: endLng }));
+  }
+  return minimum;
+};
+
+const localDate = (timeZone: string) => new Intl.DateTimeFormat('en-CA', {
+  timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+}).format(new Date());
+
 async function getFcmAccessToken() {
   if (cachedFcmAccessToken && Date.now() < cachedFcmAccessTokenUntil) return cachedFcmAccessToken;
 
@@ -125,8 +164,22 @@ Deno.serve(async request => {
     const { runId, lat, lng } = payload;
     if (!runId || !Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error('Ubicación inválida.');
 
-    const { data: activeRun, error: runError } = await admin.from('route_runs').select('municipality_id,route_id,driver_id,status').eq('id', runId).single();
+    const { data: activeRun, error: runError } = await admin.from('route_runs').select('municipality_id,route_id,driver_id,status,service_date').eq('id', runId).single();
     if (runError || !activeRun || activeRun.driver_id !== user.id || activeRun.status !== 'active') throw new Error('El recorrido no está activo.');
+
+    const timeZone = Deno.env.get('APP_TIME_ZONE') || 'America/Argentina/Buenos_Aires';
+    if (activeRun.service_date !== localDate(timeZone)) throw new Error('El recorrido no corresponde al día actual.');
+
+    const { data: activeRoute, error: routeError } = await admin
+      .from('routes')
+      .select('route_path,active')
+      .eq('id', activeRun.route_id)
+      .eq('municipality_id', activeRun.municipality_id)
+      .single();
+    if (routeError || !activeRoute?.active || !activeRoute.route_path) throw new Error('La hoja de ruta activa no tiene un trazado geográfico válido.');
+
+    const configuredCorridor = Number(Deno.env.get('ROUTE_COVERAGE_RADIUS_M') || 100);
+    const routeCoverageRadiusM = Number.isFinite(configuredCorridor) && configuredCorridor > 0 ? configuredCorridor : 100;
 
     const vapidPublic = Deno.env.get('VAPID_PUBLIC_KEY');
     const vapidPrivate = Deno.env.get('VAPID_PRIVATE_KEY');
@@ -153,7 +206,9 @@ Deno.serve(async request => {
     for (const profile of profiles || []) {
       const preference = settingsById.get(profile.id);
       if (!preference) continue;
-      const distance = distanceMeters({ lat, lng }, { lat: profile.home_lat, lng: profile.home_lng });
+      const home = { lat: profile.home_lat, lng: profile.home_lng };
+      if (distanceToRouteMeters(home, activeRoute.route_path) > routeCoverageRadiusM) continue;
+      const distance = distanceMeters({ lat, lng }, home);
       if (distance > preference.alert_radius_m) continue;
 
       const title = 'Camión muy cerca';
