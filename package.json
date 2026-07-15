@@ -1,0 +1,33 @@
+{
+  "name": "ecoalerta-recoleccion",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "mobile:sync": "npm run build && cap sync",
+    "android:open": "npm run build && cap sync android && cap open android",
+    "android:apk": "npm run build && cap sync android && cd android && gradlew.bat assembleDebug",
+    "ios:open": "npm run build && cap sync ios && cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.6.7",
+    "@capacitor/core": "^7.6.7",
+    "@capacitor/ios": "^7.6.7",
+    "@capacitor/push-notifications": "^7.0.7",
+    "@supabase/supabase-js": "^2.109.0",
+    "@vitejs/plugin-react": "latest",
+    "leaflet": "^1.9.4",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-leaflet": "^5.0.0",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.6.7",
+    "firebase-tools": "^15.23.0"
+  }
+}

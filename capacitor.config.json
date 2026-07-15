@@ -1,0 +1,16 @@
+{
+  "appId": "com.ecoalerta.recoleccion",
+  "appName": "EcoAlerta",
+  "webDir": "dist",
+  "android": {
+    "adjustMarginsForEdgeToEdge": "force"
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["alert", "sound"]
+    }
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}

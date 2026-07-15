@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+.supabase/
+supabase/.temp/
+.firebase-service-account.json
+.firebase-service-account.json.json

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "592731990135",
+    "project_id": "ecoalerta-recoleccion-ar",
+    "storage_bucket": "ecoalerta-recoleccion-ar.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:592731990135:android:e54c76dc1922cf56b3fe72",
+        "android_client_info": {
+          "package_name": "com.ecoalerta.recoleccion"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAFp3zrbxINz6ghWuOb2n36uE3Wp6NsM4k"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
