@@ -34,6 +34,10 @@
 @media(max-width:650px){.admin-heading h1{font-size:22px}}
 
 /* Altura dinámica para contenedores nativos y navegadores móviles. */
+/* Editor de recorridos en una vista dedicada de pantalla completa. */
+.route-map-selector .open-route-editor{height:39px;margin-bottom:1px;white-space:nowrap}.route-map-preview{background:#fff;border:1px solid #dce4dd;border-radius:17px;overflow:hidden;box-shadow:0 7px 25px #213b2b0b}.route-map-preview-heading{padding:13px 16px;border-bottom:1px solid #e7ece8}.route-map-preview-heading b,.route-map-preview-heading small{display:block}.route-map-preview-heading b{font-size:12px}.route-map-preview-heading small{font-size:9px;color:#77857e;margin-top:3px}.route-map-preview .leaflet-live-map{height:clamp(360px,55vh,600px)}.route-editor-screen{position:fixed;inset:0;z-index:100;background:#eef2ed;padding:12px}.route-editor-screen .route-designer{height:calc(100dvh - 24px);display:flex;flex-direction:column;border-radius:13px}.route-editor-screen .leaflet-route-map{height:auto;min-height:0;flex:1}.designer-heading{display:flex;align-items:center;gap:10px;min-width:0}.designer-back{width:38px;height:38px;flex:0 0 38px;border:1px solid #dce4dd;border-radius:9px;background:#f7f9f6;color:#176b4b;display:grid;place-items:center}.designer-back svg{width:18px}
+@media(max-width:760px){.route-map-selector .open-route-editor{width:100%;justify-content:center;margin-top:8px}.route-editor-screen{padding:0}.route-editor-screen .route-designer{height:100dvh;border:0;border-radius:0}.route-editor-screen .leaflet-route-map{min-height:240px}.route-editor-screen .route-designer-toolbar{padding:9px}.route-editor-screen .route-designer-footer{padding:8px}.route-editor-screen .route-designer-footer>span{text-align:center}}
+
 html,body,#root{min-height:100%}
 body{min-height:100dvh}
 .landing,.app-shell,.admin-shell,.municipality-picker,.splash{min-height:100dvh}
