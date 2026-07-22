@@ -6,6 +6,11 @@
     "adjustMarginsForEdgeToEdge": "force"
   },
   "plugins": {
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#102F23",
+      "overlaysWebView": false
+    },
     "PushNotifications": {
       "presentationOptions": ["alert", "sound"]
     }
