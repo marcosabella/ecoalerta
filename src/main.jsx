@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { App as CapacitorApp } from '@capacitor/app';
+import { Browser } from '@capacitor/browser';
+import { Capacitor } from '@capacitor/core';
 import { ArrowLeft, Bell, CalendarDays, Check, ChevronRight, CircleUserRound, Clock3, Crosshair, Home, LocateFixed, LockKeyhole, LogOut, MapPin, Menu, Navigation, Play, Plus, Radio, Route, Settings, ShieldCheck, Trash2, Truck, UserRound, Volume2, X } from 'lucide-react';
-import { distanceMeters } from './geo';
+import { distanceMeters, distanceToRouteMeters } from './geo';
 import { enablePush, sendPushTest } from './push';
 import { AdminPanel } from './AdminPanels';
 import { LiveRouteMap } from './RouteMap';
@@ -22,7 +25,13 @@ const userPoint = profile => profile?.home_lat != null ? { lat: profile.home_lat
 const currentWeekday = () => ((new Date().getDay() + 6) % 7) + 1;
 const operatesToday = assignment => Array.isArray(assignment?.weekdays)
   && assignment.weekdays.includes(currentWeekday());
+const weekdayNames = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'];
+const assignmentDaysLabel = assignment => Array.isArray(assignment?.weekdays)
+  ? assignment.weekdays.map(day => weekdayNames[day - 1]).filter(Boolean).join(', ')
+  : 'Sin días configurados';
 const ROUTE_START_RADIUS_M = 60;
+const ROUTE_COVERAGE_RADIUS_M = 100;
+const NATIVE_AUTH_CALLBACK = 'com.ecoalerta.recoleccion://auth/callback';
 
 const currentPosition = () => new Promise((resolve, reject) => {
   if (!navigator.geolocation) return reject(new Error('Este dispositivo no permite obtener la ubicación.'));
@@ -47,6 +56,7 @@ function App() {
   const [preferences, setPreferences] = useState({ alert_radius_m: 400, push_enabled: true });
   const [route, setRoute] = useState(null);
   const [assignment, setAssignment] = useState(null);
+  const [assignedRoutes, setAssignedRoutes] = useState([]);
   const [vehicle, setVehicle] = useState(null);
   const [stops, setStops] = useState(fallbackStops);
   const [run, setRun] = useState(null);
@@ -74,6 +84,37 @@ function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  useEffect(() => {
+    if (!supabase || !Capacitor.isNativePlatform()) return undefined;
+
+    let urlListener;
+
+    const processAuthCallback = async url => {
+      if (!url?.startsWith(NATIVE_AUTH_CALLBACK)) return;
+
+      try {
+        const code = new URL(url).searchParams.get('code');
+        if (!code) throw new Error('Supabase no devolvió el código de autenticación.');
+
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) throw error;
+
+        await Browser.close().catch(() => {});
+      } catch (error) {
+        setToast(`No se pudo completar el ingreso con Google: ${error.message}`);
+      }
+    };
+
+    const registerAuthCallback = async () => {
+      urlListener = await CapacitorApp.addListener('appUrlOpen', ({ url }) => processAuthCallback(url));
+      const launch = await CapacitorApp.getLaunchUrl();
+      if (launch?.url) await processAuthCallback(launch.url);
+    };
+
+    registerAuthCallback();
+    return () => { urlListener?.remove(); };
+  }, []);
+
   const loadData = useCallback(async () => {
     if (!session?.user) return;
     const [profileResult, settingsResult, municipalityResult, alertsResult] = await Promise.all([
@@ -91,31 +132,45 @@ function App() {
     setAlerts(alertsResult.data || []);
     if (['admin', 'platform_admin', 'municipal_admin'].includes(nextProfile.role) || !nextProfile.municipality_id) return;
 
-    const runQuery = supabase.from('route_runs').select('*').eq('municipality_id', nextProfile.municipality_id).in('status', ['active', 'paused']).order('created_at', { ascending: false }).limit(1);
+    const runQuery = supabase.from('route_runs').select('*').eq('municipality_id', nextProfile.municipality_id).in('status', ['active', 'paused']).order('created_at', { ascending: false });
     if (nextProfile.role === 'driver') runQuery.eq('driver_id', session.user.id);
     const [routesResult, vehiclesResult, assignmentsResult, runResult] = await Promise.all([
       supabase.from('routes').select('*').eq('municipality_id', nextProfile.municipality_id).eq('active', true).order('name'),
       supabase.from('vehicles').select('*').eq('municipality_id', nextProfile.municipality_id).eq('active', true).order('unit_number'),
       supabase.from('route_assignments').select('*').eq('municipality_id', nextProfile.municipality_id).eq('active', true).order('created_at', { ascending: false }),
-      runQuery.maybeSingle(),
+      runQuery,
     ]);
     const assignments = assignmentsResult.data || [];
+    const driverAssignments = nextProfile.role === 'driver'
+      ? assignments.filter(item => item.driver_id === session.user.id || !item.driver_id)
+      : assignments;
     const todayAssignments = assignments.filter(operatesToday);
-    const queriedRun = runResult.data || null;
-    const activeRun = queriedRun && todayAssignments.some(item =>
-      item.route_id === queriedRun.route_id
-      && item.vehicle_id === queriedRun.vehicle_id
-      && (nextProfile.role !== 'driver' || !item.driver_id || item.driver_id === session.user.id)
-    ) ? queriedRun : null;
+    const openRuns = runResult.data || [];
+    const home = userPoint(nextProfile);
+    const activeRun = openRuns.find(item => {
+      const matchingAssignment = todayAssignments.some(assignmentItem => assignmentItem.route_id === item.route_id && assignmentItem.vehicle_id === item.vehicle_id);
+      const activeRoute = (routesResult.data || []).find(routeItem => routeItem.id === item.route_id);
+      const coversHome = nextProfile.role === 'driver' || (distanceToRouteMeters(home, activeRoute?.route_path) ?? Infinity) <= ROUTE_COVERAGE_RADIUS_M;
+      return matchingAssignment && coversHome && (nextProfile.role !== 'driver' || item.driver_id === session.user.id);
+    }) || null;
     const selectedAssignment = nextProfile.role === 'driver'
       ? todayAssignments.find(item => item.driver_id === session.user.id) || todayAssignments.find(item => !item.driver_id)
       : todayAssignments.find(item => item.route_id === activeRun?.route_id && item.vehicle_id === activeRun?.vehicle_id) || todayAssignments[0];
-    const selectedRoute = (routesResult.data || []).find(item => item.id === (activeRun?.route_id || selectedAssignment?.route_id)) || null;
-    const selectedVehicle = (vehiclesResult.data || []).find(item => item.id === (activeRun?.vehicle_id || selectedAssignment?.vehicle_id)) || null;
+    const selectedRoute = (routesResult.data || []).find(item => item.id === (activeRun?.route_id || selectedAssignment?.route_id))
+      || (nextProfile.role === 'neighbor' ? (routesResult.data || [])[0] : null);
+    const routeAssignment = selectedAssignment || assignments.find(item => item.route_id === selectedRoute?.id) || null;
+    const selectedVehicle = (vehiclesResult.data || []).find(item => item.id === (activeRun?.vehicle_id || routeAssignment?.vehicle_id)) || null;
+    const routeOptions = nextProfile.role === 'driver'
+      ? driverAssignments.map(item => ({ assignment: item, route: (routesResult.data || []).find(routeItem => routeItem.id === item.route_id) || null, vehicle: (vehiclesResult.data || []).find(vehicleItem => vehicleItem.id === item.vehicle_id) || null }))
+      : (routesResult.data || []).map(routeItem => {
+        const item = assignments.find(assignmentItem => assignmentItem.route_id === routeItem.id) || null;
+        return { assignment: item, route: routeItem, vehicle: (vehiclesResult.data || []).find(vehicleItem => vehicleItem.id === item?.vehicle_id) || null };
+      });
+    setAssignedRoutes(routeOptions.filter(item => item.route));
     const stopsResult = selectedRoute
       ? await supabase.from('route_stops').select('*').eq('route_id', selectedRoute.id).order('stop_order')
       : { data: [] };
-    setAssignment(selectedAssignment || null);
+    setAssignment(routeAssignment);
     setRoute(selectedRoute);
     setVehicle(selectedVehicle);
     setStops(stopsResult.data?.length ? stopsResult.data.map((stop, index) => ({ ...stop, x: fallbackStops[index]?.x, y: fallbackStops[index]?.y })) : []);
@@ -126,6 +181,16 @@ function App() {
     } else setLocation(null);
   }, [session]);
 
+  const selectAssignedRoute = async option => {
+    if (!option?.route) return;
+    const { data, error } = await supabase.from('route_stops').select('*').eq('route_id', option.route.id).order('stop_order');
+    if (error) return setToast(`No se pudo cargar la hoja de ruta: ${error.message}`);
+    setAssignment(option.assignment || null);
+    setRoute(option.route);
+    setVehicle(option.vehicle || null);
+    setStops((data || []).map((stop, index) => ({ ...stop, x: fallbackStops[index]?.x, y: fallbackStops[index]?.y })));
+  };
+
   useEffect(() => { loadData(); }, [loadData]);
 
   useEffect(() => {
@@ -133,7 +198,8 @@ function App() {
     const channel = supabase.channel('ecoalerta-live')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'route_runs' }, payload => {
         const next = payload.new;
-        if (next?.municipality_id === profile.municipality_id && (profile.role !== 'driver' || next.driver_id === session.user.id)) setRun(['active', 'paused'].includes(next.status) ? next : null);
+        if (next?.municipality_id === profile.municipality_id && profile.role !== 'driver') loadData();
+        else if (next?.municipality_id === profile.municipality_id && next.driver_id === session.user.id) setRun(['active', 'paused'].includes(next.status) ? next : null);
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'vehicle_locations' }, payload => {
         if (payload.new?.run_id === run?.id) setLocation(payload.new);
@@ -176,6 +242,7 @@ function App() {
 
   const createRun = async () => {
     if (!assignment) return setToast('No tenés una hoja de ruta asignada. Consultá al administrador municipal.');
+    if (!operatesToday(assignment)) return setToast('Esta hoja de ruta no corresponde al día de hoy. Podés consultarla, pero no iniciar el recorrido.');
     const { data, error } = await supabase.from('route_runs').insert({ municipality_id: profile.municipality_id, route_id: assignment.route_id, vehicle_id: assignment.vehicle_id, driver_id: session.user.id, status: 'active', started_at: new Date().toISOString() }).select().single();
     if (error) return setToast(error.message);
     setApproach(null); setRun(data);
@@ -204,6 +271,7 @@ function App() {
       return;
     }
     if (!assignment) return setToast('No tenés una hoja de ruta asignada. Consultá al administrador municipal.');
+    if (!operatesToday(assignment)) return setToast('Esta hoja de ruta no corresponde al día de hoy. Podés consultarla, pero no iniciar el recorrido.');
     const firstCoordinate = route?.route_path?.coordinates?.[0];
     if (!firstCoordinate) return createRun();
     setLocatingStart(true);
@@ -313,7 +381,7 @@ function App() {
       <div className="profile-card"><div className="profile-icon">{role === 'truck' ? <Truck /> : <UserRound />}</div><div><b>{displayName}</b><small>{role === 'truck' ? `Chofer · Unidad ${vehicle?.unit_number || 'sin asignar'}` : municipality?.name || 'Vecino registrado'}</small></div></div>
       <nav>
         <Nav active={screen === 'home'} icon={<Home />} label="Inicio" onClick={() => navigate('home')} />
-        <Nav active={screen === 'route'} icon={<Route />} label={role === 'truck' ? 'Hoja de ruta' : 'Recorrido de hoy'} onClick={() => navigate('route')} />
+        <Nav active={screen === 'route'} icon={<Route />} label={role === 'truck' ? 'Hoja de ruta' : 'Hojas de ruta'} onClick={() => navigate('route')} />
         <Nav active={screen === 'alerts'} icon={<Bell />} label="Alertas" onClick={() => navigate('alerts')} badge={alerts.filter(item => !item.read_at).length || null} />
         <Nav active={screen === 'settings'} icon={<Settings />} label="Configuración" onClick={() => navigate('settings')} />
       </nav>
@@ -321,9 +389,9 @@ function App() {
     </aside>
     <main className="content">
       {screen === 'home' && (role === 'truck'
-        ? <TruckHome running={running} hasRun={Boolean(run)} approach={approach} locatingStart={locatingStart} cancelApproach={() => { setApproach(null); setLocation(null); }} toggleRun={toggleRun} finishRun={finishRun} route={route} vehicle={vehicle} stops={stops} truckGeo={truckGeo} location={location} />
+        ? <TruckHome running={running} hasRun={Boolean(run)} canStart={operatesToday(assignment)} approach={approach} locatingStart={locatingStart} cancelApproach={() => { setApproach(null); setLocation(null); }} toggleRun={toggleRun} finishRun={finishRun} route={route} vehicle={vehicle} stops={stops} truckGeo={truckGeo} location={location} />
         : <NeighborHome running={running} route={route} stops={stops} vehicle={vehicle} municipality={municipality} truckGeo={truckGeo} homeGeo={homeGeo} meters={meters} radius={preferences.alert_radius_m} setScreen={setScreen} hasHome={Boolean(homeGeo)} />)}
-      {screen === 'route' && <RouteScreen role={role} route={route} stops={stops} truckGeo={truckGeo} homeGeo={role === 'neighbor' ? homeGeo : null} running={running} />}
+      {screen === 'route' && <RouteScreen role={role} route={route} stops={stops} truckGeo={role === 'neighbor' && run?.route_id !== route?.id ? null : truckGeo} homeGeo={role === 'neighbor' ? homeGeo : null} running={running && run?.route_id === route?.id} assignedRoutes={assignedRoutes} selectedAssignment={assignment} onSelectAssignedRoute={selectAssignedRoute} />}
       {screen === 'alerts' && <AlertsScreen role={role} radius={preferences.alert_radius_m} alertsEnabled={preferences.push_enabled} savePreferences={savePreferences} meters={meters} alerts={alerts} activatePush={activatePush} />}
       {screen === 'settings' && <SettingsScreen role={role} profile={profile} email={session.user.email} municipality={municipality} municipalities={municipalities} chooseMunicipality={chooseMunicipality} vehicle={vehicle} saveProfile={saveProfile} setHomeFromGps={setHomeFromGps} />}
     </main>
@@ -379,17 +447,21 @@ function Landing() {
   const continueWithGoogle = async () => {
     setLoading(true);
     setMessage('');
-    const { error } = await supabase.auth.signInWithOAuth({
+    const isNative = Capacitor.isNativePlatform();
+    const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: `${window.location.origin}${window.location.pathname}`,
+        redirectTo: isNative ? NATIVE_AUTH_CALLBACK : `${window.location.origin}${window.location.pathname}`,
+        skipBrowserRedirect: isNative,
         queryParams: { prompt: 'select_account' },
       },
     });
     if (error) {
       setLoading(false);
       setMessage(`No se pudo iniciar con Google: ${error.message}`);
+      return;
     }
+    if (isNative && data?.url) await Browser.open({ url: data.url });
   };
 
   const recoverPassword = async () => {
@@ -419,10 +491,10 @@ function GoogleMark() {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285f4" d="M21.6 12.23c0-.71-.06-1.4-.18-2.07H12v3.92h5.38a4.6 4.6 0 0 1-2 3.02v2.54h3.24c1.9-1.75 2.98-4.33 2.98-7.41Z"/><path fill="#34a853" d="M12 22c2.7 0 4.97-.9 6.62-2.36l-3.24-2.54c-.9.6-2.05.96-3.38.96-2.61 0-4.82-1.76-5.61-4.13H3.04v2.62A10 10 0 0 0 12 22Z"/><path fill="#fbbc05" d="M6.39 13.93A6 6 0 0 1 6.08 12c0-.67.11-1.32.31-1.93V7.45H3.04A10 10 0 0 0 2 12c0 1.64.39 3.19 1.04 4.55l3.35-2.62Z"/><path fill="#ea4335" d="M12 5.94c1.47 0 2.79.51 3.83 1.5l2.87-2.88A9.64 9.64 0 0 0 12 2a10 10 0 0 0-8.96 5.45l3.35 2.62C7.18 7.7 9.39 5.94 12 5.94Z"/></svg>;
 }
 
-function TruckHome({ running, hasRun, approach, locatingStart, cancelApproach, toggleRun, finishRun, route, vehicle, stops, truckGeo, location }) {
+function TruckHome({ running, hasRun, canStart, approach, locatingStart, cancelApproach, toggleRun, finishRun, route, vehicle, stops, truckGeo, location }) {
   const approaching = Boolean(approach);
   return <><PageTitle eyebrow="RECORRIDO DE HOY" title="Panel del conductor" subtitle="Tu GPS se comparte únicamente mientras el recorrido está activo." />
-    <div className="run-controls">{approaching ? <button className="start-button stop" onClick={cancelApproach}><span><X /></span><div><small>NAVEGACIÓN PREVIA</small>Cancelar traslado</div></button> : <button className={`start-button ${running ? 'stop' : ''}`} disabled={locatingStart} onClick={toggleRun}>{running ? <><span><X /></span><div><small>DETENER TEMPORALMENTE</small>Pausar recorrido</div></> : <><span><Play /></span><div><small>{locatingStart ? 'CALCULANDO MEJOR RUTA' : 'ACTIVAR GPS'}</small>{locatingStart ? 'Ubicando el camión…' : hasRun ? 'Reanudar recorrido' : 'Iniciar recorrido'}</div></>}</button>}{hasRun && <button className="outline finish-button" onClick={finishRun}><Check /> Finalizar recorrido</button>}</div>
+    <div className="run-controls">{approaching ? <button className="start-button stop" onClick={cancelApproach}><span><X /></span><div><small>NAVEGACIÓN PREVIA</small>Cancelar traslado</div></button> : <button className={`start-button ${running ? 'stop' : ''}`} disabled={locatingStart || (!hasRun && !canStart)} onClick={toggleRun}>{running ? <><span><X /></span><div><small>DETENER TEMPORALMENTE</small>Pausar recorrido</div></> : <><span><Play /></span><div><small>{!hasRun && !canStart ? 'SOLO CONSULTA' : locatingStart ? 'CALCULANDO MEJOR RUTA' : 'ACTIVAR GPS'}</small>{!hasRun && !canStart ? 'No disponible hoy' : locatingStart ? 'Ubicando el camión…' : hasRun ? 'Reanudar recorrido' : 'Iniciar recorrido'}</div></>}</button>}{hasRun && <button className="outline finish-button" onClick={finishRun}><Check /> Finalizar recorrido</button>}</div>
     <section className={`status-banner ${running || approaching ? 'active' : ''}`}><div className="status-symbol">{running ? <Radio /> : approaching ? <Navigation /> : <Truck />}</div><div><small>{approaching ? 'TRASLADO AL PUNTO DE INICIO' : 'ESTADO DEL RECORRIDO'}</small><h3>{running ? 'Recorrido en curso' : approaching ? 'Seguí la ruta marcada hasta el inicio' : 'Listo para comenzar'}</h3><p>{running ? 'Tu ubicación se comparte en tiempo real con los vecinos.' : approaching ? `${(approach.distance / 1000).toFixed(1)} km · ${Math.max(1, Math.round(approach.duration / 60))} min estimados. El recorrido se activará al llegar.` : 'Revisá la hoja de ruta antes de iniciar.'}</p></div><span className="status-tag">{running ? 'EN VIVO' : approaching ? 'HACIA EL INICIO' : 'EN PAUSA'}</span></section>
     <div className="dashboard-grid"><MapCard route={route} stops={stops} truckGeo={truckGeo} running={running} navigationPath={approach?.path} routeStart={approach?.start} location={location} /><div className="side-stack"><RouteSummary route={route} stops={stops} /></div></div>
     <section className="stats"><div><span><LocateFixed /></span><p><b>{location ? 'GPS conectado' : 'GPS en espera'}</b><small>{location?.accuracy_m ? `Precisión ±${Math.round(location.accuracy_m)} m` : 'Se solicitará al iniciar'}</small></p></div><div><span><Truck /></span><p><b>Unidad {vehicle?.unit_number || 'sin asignar'}</b><small>{vehicle?.plate || 'La asigna el municipio'}</small></p></div><div><span><Bell /></span><p><b>Alertas automáticas</b><small>Una por recorrido y domicilio</small></p></div></section></>;
@@ -441,7 +513,24 @@ function MapCard({ route, stops, truckGeo, homeGeo, running, navigationPath, rou
   return <section className="map-card card"><div className="map-toolbar"><div><small>{navigationPath ? 'MEJOR RUTA HASTA EL INICIO' : 'RECORRIDO Y UBICACIÓN EN TIEMPO REAL'}</small><b>{route?.route_path ? route.name : 'El municipio todavía no dibujó el recorrido'}</b></div><button title="Mapa geográfico"><Crosshair /></button></div><LiveRouteMap routePath={route?.route_path} navigationPath={navigationPath} routeStart={routeStart} stops={stops} truck={truckGeo} home={homeGeo} running={running} /><div className="map-footer"><span><span className={running ? 'live-dot' : 'gray-dot'} /> {running ? 'Transmitiendo ubicación' : navigationPath ? 'Navegando al inicio' : 'GPS en espera'}</span><small>{running ? 'Actualización automática' : navigationPath ? 'Los vecinos aún no ven el camión' : 'Sin actividad'}</small></div></section>;
 }
 
-function RouteScreen({ role, route, stops, truckGeo, homeGeo, running }) { return <><PageTitle eyebrow="HOJA DE RUTA" title={route?.name || 'Ruta sin asignar'} subtitle={role === 'truck' ? 'Ruta asignada para hoy.' : 'Recorrido de recolección asignado a tu zona.'} /><div className="dashboard-grid"><MapCard route={route} stops={stops} truckGeo={truckGeo} homeGeo={homeGeo} running={running} /><section className="card route-detail"><div className="card-title"><div><small>PARADAS DEL RECORRIDO</small><h3>{route?.schedule_text || 'Turno mañana'}</h3></div></div>{stops.map((stop, index) => <div className="route-row" key={stop.id || stop.name}><span>{index + 1}</span><div><b>{stop.name}</b><small><MapPin /> Punto de control · {timeLabel(stop.estimated_time)} h</small></div></div>)}</section></div></>; }
+function RouteScreen({ role, route, stops, truckGeo, homeGeo, running, assignedRoutes = [], selectedAssignment, onSelectAssignedRoute }) {
+  const availableToday = operatesToday(selectedAssignment);
+  const routeDistance = distanceToRouteMeters(homeGeo, route?.route_path);
+  const homeIncluded = routeDistance != null && routeDistance <= ROUTE_COVERAGE_RADIUS_M;
+  const isNeighbor = role === 'neighbor';
+  return <><PageTitle eyebrow="HOJAS DE RUTA" title={route?.name || 'Ruta sin asignar'} subtitle={isNeighbor ? 'Consultá los recorridos del municipio y verificá si pasan por tu domicilio.' : 'Consultá todas tus hojas de ruta asignadas.'} />
+    <section className="card assigned-route-list"><div className="card-title"><div><small>{isNeighbor ? 'HOJAS DE RUTA MUNICIPALES' : 'MIS HOJAS DE RUTA'}</small><h3>{isNeighbor ? 'Recorridos disponibles' : 'Rutas asignadas'}</h3></div><span className="route-chip">{assignedRoutes.length}</span></div>
+      {assignedRoutes.length ? <div className="assigned-route-options">{assignedRoutes.map(option => {
+        const today = operatesToday(option.assignment);
+        const selected = option.route.id === route?.id;
+        const distance = distanceToRouteMeters(homeGeo, option.route.route_path);
+        const included = distance != null && distance <= ROUTE_COVERAGE_RADIUS_M;
+        return <button type="button" className={selected ? 'selected' : ''} key={option.route.id} onClick={() => onSelectAssignedRoute(option)}><span><b>{option.route.name}</b><small>{option.route.code}{option.vehicle ? ` · Unidad ${option.vehicle.unit_number}` : ''}</small></span><span><i className={isNeighbor ? (included ? 'today' : '') : (today ? 'today' : '')}>{isNeighbor ? (!homeGeo ? 'UBICÁ TU DOMICILIO' : included ? 'INCLUYE TU DOMICILIO' : 'NO INCLUYE TU DOMICILIO') : (today ? 'ACTIVA HOY' : 'SOLO CONSULTA')}</i><small>{option.assignment ? assignmentDaysLabel(option.assignment) : option.route.schedule_text || 'Sin cronograma'}</small></span></button>;
+      })}</div> : <p className="muted">No hay hojas de ruta publicadas.</p>}
+    </section>
+    {isNeighbor && <section className={`route-coverage-banner ${!homeGeo ? 'unknown' : homeIncluded ? 'included' : 'excluded'}`}><span>{!homeGeo ? <MapPin /> : homeIncluded ? <Check /> : <X />}</span><div><b>{!homeGeo ? 'Configurá la ubicación de tu domicilio' : homeIncluded ? 'Tu domicilio está incluido en esta traza' : 'Tu domicilio no está incluido en esta traza'}</b><small>{!homeGeo ? 'Necesitamos la ubicación exacta para comprobar la cobertura.' : homeIncluded ? `La traza pasa a ${routeDistance} m de tu domicilio. Recibirás la alerta cuando este recorrido esté activo y el camión se acerque.` : routeDistance == null ? 'Esta hoja de ruta todavía no tiene una traza geográfica válida.' : `El punto más cercano de la traza está a ${routeDistance} m. No recibirás alertas de esta hoja de ruta.`}</small></div></section>}
+    <div className="dashboard-grid"><MapCard route={route} stops={stops} truckGeo={truckGeo} homeGeo={homeGeo} running={running} /><section className="card route-detail"><div className="card-title"><div><small>PARADAS DEL RECORRIDO</small><h3>{route?.schedule_text || 'Cronograma municipal'}</h3></div>{role === 'truck' && selectedAssignment && <span className={`route-availability ${availableToday ? 'today' : ''}`}>{availableToday ? 'HABILITADA HOY' : 'NO DISPONIBLE HOY'}</span>}</div>{stops.map((stop, index) => <div className="route-row" key={stop.id || stop.name}><span>{index + 1}</span><div><b>{stop.name}</b><small><MapPin /> Punto de control · {timeLabel(stop.estimated_time)} h</small></div></div>)}</section></div></>;
+}
 
 function AlertsScreen({ role, radius, alertsEnabled, savePreferences, meters, alerts, activatePush }) {
   if (role === 'truck') return <><PageTitle eyebrow="CENTRO DE ALERTAS" title="Avisos del recorrido" subtitle="Las alertas se generan automáticamente al entrar en el radio de cada vecino." /><section className="card alerts-table"><div className="big-stat"><Bell /><div><b>{alerts.length}</b><span>alertas registradas para esta cuenta</span></div></div></section></>;
